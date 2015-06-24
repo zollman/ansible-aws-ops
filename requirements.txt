@@ -1,0 +1,12 @@
+ipython
+pyzmq
+tornado
+six
+python-dateutil==2.2
+jinja2
+jsonschema
+boto
+matplotlib
+
+botocore>0.100.0
+boto3

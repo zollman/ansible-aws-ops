@@ -1,0 +1,46 @@
+---
+# Ansible playbook demonstrating the use of the aws-ops role and associated
+# tasks.
+
+- name: Exercise AWS module code
+  hosts: localhost
+  gather_facts: false
+  vars:
+  - rolename: "my_role"
+
+  roles: 
+  - role: aws-ops
+
+  tasks:
+  - name: Exercise the AWS API
+    aws: 
+      # ---- Global configuration
+      #aws_access_key_id: MY_KEY
+      #aws_secret_access_key: MY_SECRET_KEY
+      # ---- Demo 1: get a single role
+      #service: iam
+      #operation: get-role
+      #params:
+      #  role-name: '{{rolename}}'
+      # profile: default 
+
+      # ---- Demos 2a-c: list all roles, then filter & reshape
+      service: iam
+      operation: list-roles
+      query: Roles[].RoleName
+      #query: Roles[?RoleName=='{{rolename}}'].RoleName
+
+      # ---- Demo 3: another service
+      # service: ec2
+      # operation: describe-vpcs
+      # query: Vpcs[].Tags[?Key=='Name'].Value | []
+
+      # ---- Demo 4: buckets
+      # service: s3
+      # operation: list-buckets
+      # query: Buckets[].Name
+
+    register: results
+
+  - name: Debug results
+    debug: var=results

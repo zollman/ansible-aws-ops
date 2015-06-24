@@ -1,0 +1,17 @@
+---
+- name: Get all buckets
+  aws: 
+    service: s3
+    operation: list-buckets
+    query: Buckets[?Name=='{{bucket}}'].Name
+  register: buckets
+  changed_when: false
+
+- name: Create bucket if it doesnt already exist
+  aws:
+    service: s3
+    operation: create-bucket
+    params:
+      bucket: "{{bucket}}"
+  when: buckets.result|length==0
+  changed_when: true

@@ -1,0 +1,294 @@
+#!/usr/bin/python
+#
+
+DOCUMENTATION = '''
+---
+module: aws
+short_description: exercise the Amazon APIs
+description:
+    - Provides access through ansible playbooks to any command
+      that can be executed by the AWS CLI
+options:
+  service:
+    description:
+      - AWS service to call, e.g. iam, ec2 or s3. See AWS cli for a complete list.
+    required: true
+    default: null
+  operation:
+    description:
+      - AWS subcommand to call, e.g. list-roles or describe-reservations
+    required: true
+    default: null
+  params:
+    description:
+      - Parameters to the subcommand, e.g. role or path-prefix
+    required: false
+    default: null
+  query:
+    description:
+      - A JMESPath query to use in filtering the response data
+    required: false
+    default: null
+  endpoint_url:
+    description:
+      - Override the default AWS API URL with the given URL
+    required: false
+    default: null
+  no_verify_ssl:
+    description:
+      - Overrides the default behavior of verifying SSL certificates
+    required: false
+    default: null
+  no_paginate:
+    description:
+      - Disable automatic pagination
+    required: false
+    default: null
+  profile:
+    description:
+      - Use a specific profile from your credential file
+    required: false
+    default: null
+  region:
+    description:
+      - The region to use. Overrides config / env settings.
+    required: false
+    default: null
+  aws_access_key_id:
+    description:
+      - AWS access key ID to use. Overrides profile, config or env settings.
+    required: false
+    default: null
+  aws_secret_access_key:
+    description:
+      - AWS secret access key to use. Overrides profile, config or env settings.
+    required: false
+    default: null
+  aws_session_token:
+    description:
+      - AWS session token to use. Overrides profile, config or env settings.
+    required: false
+    default: null
+author: CE team
+'''
+
+
+import datetime
+
+try:
+    import botocore
+    from botocore import xform_name
+    import botocore.session
+    from botocore.exceptions import EndpointConnectionError, ClientError, \
+        NoCredentialsError
+    import jmespath
+    from jmespath.exceptions import JMESPathError
+    BOTO_OK = True
+except ImportError as e:
+    BOTO_OK = False
+
+
+def default_serializer(obj):
+    '''Teach the JSON module to serialize datetimes.
+       Ref: http://stackoverflow.com/questions/11875770/how-to-overcome-datetime-datetime-not-json-serializable-in-python
+    '''
+    if isinstance(obj, datetime.datetime):
+        return obj.isoformat()
+    else:
+        raise NotImplementedError('No JSON serializer for type {0}'.format(type(obj)))
+
+
+class AWSException(Exception):
+    '''Exception we throw when parameters don't validate successfully.'''
+    pass
+
+
+class BotoSession:
+    '''Encapsulates the logic required to look up, validate, and
+       execute a call against the AWS APIs using boto core (but
+       taking parameters as though they were the AWS CLI)'''
+
+    def _get_op_model(self, service_name, operation_name):
+        '''Looks up the operations model (docs, input/output shape,
+           canonical name) within the boto JSON; raises AWSException if
+           service or operation name is invalid.
+        '''
+        # Validate service name
+        if service_name not in self.session.get_available_services():
+            raise AWSException('{0} is an invalid service name'.format(service_name))  # TODO:i18n
+        service_model = self.session.get_service_model(service_name)
+
+        # Validate (and transform) operation name from
+        # AWS CLI format (list-roles) to wire format (ListRoles)
+        operations = dict([(xform_name(op, '-'), op)
+                    for op in service_model.operation_names])
+        if operation_name not in operations:
+            raise AWSException(("{0} is an invalid operation for the {1} module.\n" +
+                    "Operations are formatted like the AWS CLI, e.g. list-roles.").format(operation_name, service_name))  # TODO:i18n
+
+        op_wire_name = operations[operation_name]
+        op_model = service_model.operation_model(op_wire_name)
+        return op_model
+
+    def _validate_params(self, operation_params):
+        '''Validates parameters passed in as AWS CLI format (i.e., role-name),
+           converts them to wire format (e.g. RoleName), and validates that
+           all required parameters are present / no invalid parameters
+           were passed in. Raises AWSException on error.
+        '''
+        params = operation_params or {}
+        op_model = self.op_model
+        if op_model.input_shape:
+            input_params = op_model.input_shape.members
+            required_params = op_model.input_shape.required_members
+        else:
+            input_params = []
+            required_params = []
+        op_allowed_params = dict([(xform_name(param, '-'), param)
+                for param in input_params])
+        invalid_params = set(params.keys()) - set(op_allowed_params.keys())
+        if invalid_params:
+            raise AWSException('Invalid parameters provided for {0}: {1}'.format(self.operation_name, ','.join(invalid_params)))
+
+        op_required_params = set([xform_name(param, '-')
+            for param in required_params])
+        missing_required_params = set(op_required_params)-set(params.keys())
+        if missing_required_params:
+            raise AWSException('Missing required parameters for {0}: {1}'.format(self.operation_name, ','.join(missing_required_params)))
+        param_transform = dict([(op_allowed_params[k], v) 
+           for k,v in params.iteritems()])
+
+        return param_transform
+
+    def __init__(self, service_name, operation_name, operation_params={}):
+        self.session = botocore.session.Session()
+        self.service_name = service_name
+        self.operation_name = operation_name
+
+        self.op_model = self._get_op_model(service_name, operation_name)
+        self.params = self._validate_params(operation_params)
+
+    def get_client(self, endpoint_url=None, region=None, no_verify_ssl=None,
+            profile=None, aws_access_key_id=None,
+            aws_secret_access_key=None, aws_session_token=None):
+        '''Gets an AWS client using configured parameters, transforming
+           CLI-style parameters into boto client parameters.
+           Passes through EndpointConnectionError or ClientError
+           from botocore.'''
+        client_kwargs = {}
+        saved_profile = self.session.profile
+
+        if endpoint_url:
+            client_kwargs['endpoint_url'] = endpoint_url
+        elif region:
+            client_kwargs['region_name'] = region
+
+        if profile:
+            self.session.profile = profile
+
+        if no_verify_ssl:
+            client_kwargs['verify'] = False
+
+        if aws_access_key_id and aws_secret_access_key:
+            client_kwargs['aws_access_key_id'] = aws_access_key_id
+            client_kwargs['aws_secret_access_key'] = aws_secret_access_key
+            if aws_session_token:
+                client_kwargs['aws_session_token'] = aws_session_token
+
+        client = self.session.create_client(self.service_name,
+                **client_kwargs)
+
+        self.session.profile = saved_profile
+        return client
+
+    def execute(self, client, no_paginate=None):
+        '''Executes the AWS call and reformats the response to spec.
+           Returns a dict with the (formatted) results, or passes
+           through EndpointConnectionError or ClientError from botocore.'''
+
+        op_func_name = xform_name(self.op_model.name, '_')
+        if no_paginate or not client.can_paginate(op_func_name):
+            op_function = getattr(client, op_func_name)
+            result = op_function(**self.params)
+        else:
+            paginator = client.get_paginator(op_func_name)
+            pageiterator = paginator.paginate(**self.params)
+            result = pageiterator.build_full_result()
+
+        return result
+
+
+def main():
+    module = AnsibleModule(
+        argument_spec=dict(
+            service=dict(required=True),
+            operation=dict(required=True),
+            endpoint_url=dict(required=False),
+            no_verify_ssl=dict(required=False),
+            no_paginate=dict(required=False),
+            profile=dict(required=False),
+            region=dict(required=False),
+            params=dict(required=False),
+            query=dict(required=False),
+            aws_access_key_id=dict(required=False),
+            aws_secret_access_key=dict(required=False),
+            aws_session_token=dict(required=False)
+            )
+        )
+
+    if not BOTO_OK:
+        if 'botocore' in globals():
+            module.fail_json(msg='Invalid boto version - botocore must be > 0.100.0, you have {0}'.format(botocore.__version__))
+        else:
+            module.fail_json(msg='Boto > 0.100.0 required for this module')
+
+    try: 
+        # Validate parameters:
+        boto_session = BotoSession(module.params['service'],
+                module.params['operation'],
+                module.params['params'])
+        if module.params.get('query'):
+            query = jmespath.compile(module.params['query'])
+        else:
+            query = None
+
+        # Create client connection / test connectivity:
+        client_params = dict([(k, module.params[k]) for k in
+                ['endpoint_url', 'no_verify_ssl', 'profile',
+                    'region', 'aws_access_key_id', 'aws_secret_access_key',
+                    'aws_session_token'] if k in module.params])
+        client = boto_session.get_client(**client_params)
+        # Execute command:
+        result = boto_session.execute(client,
+                no_paginate=module.params.get('no_paginate'))
+
+        # Filter result (if query specified):
+        if query:
+            result = query.search(result)
+    except AWSException as e:
+        module.fail_json(msg=e.message)
+    except EndpointConnectionError as ece:
+        module.fail_json(msg='EndpointConnectionError (bad region, endpoint, or network connectivity): {0}'.format(ece.message))
+    except ClientError as ce:
+        module.fail_json(msg='ClientError (bad credentials or permissions): {0}'.format(ce.message))
+    except NoCredentialsError as nce:
+        module.fail_json(msg='NoCredentialsError: {0}'.format(nce.message))
+    except JMESPathError as jpe:
+        module.fail_json(msg=jpe.message)
+
+    #
+    # HACKHACK - exit_json does not allow me to easily return datetimes
+    #   in my results. So I'm going to take the contents of
+    #   ansible.module_utils.basic.exit_json and just cut-and-paste here.
+    #
+    output = {'changed': False, 'result': result}
+    module.add_path_info(output)
+    module.do_cleanup_files()
+    try:
+        print json.dumps(output, default=default_serializer)
+        sys.exit(0)
+    except NotImplementedError as e:
+        module.fail_json(msg='Results of AWS call cannot be unicode-encoded: {0}'.str(str(output)))
+
+from ansible.module_utils.basic import *
+main()

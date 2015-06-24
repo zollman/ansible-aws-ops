@@ -1,0 +1,16 @@
+---
+# Ansible playbook demonstrating the use of the aws-ops role and associated
+# tasks.
+
+# Demonstration
+
+- name: Demo playbook
+  hosts: localhost
+  gather_facts: false
+
+  roles: 
+  - role: aws-ops
+
+  tasks:
+  - include: aws-ops/tasks/create_bucket.yml
+    bucket: aws-demo-test-bucket
