@@ -160,8 +160,9 @@ class BotoSession:
 
         return param_transform
 
-    def __init__(self, service_name, operation_name, operation_params={}):
-        self.session = botocore.session.Session()
+    def __init__(self, service_name, operation_name, operation_params={},
+            profile=None):
+        self.session = botocore.session.Session(profile=profile)
         self.service_name = service_name
         self.operation_name = operation_name
 
@@ -169,22 +170,18 @@ class BotoSession:
         self.params = self._validate_params(operation_params)
 
     def get_client(self, endpoint_url=None, region=None, no_verify_ssl=None,
-            profile=None, aws_access_key_id=None,
-            aws_secret_access_key=None, aws_session_token=None):
+            aws_access_key_id=None, aws_secret_access_key=None, 
+            aws_session_token=None):
         '''Gets an AWS client using configured parameters, transforming
            CLI-style parameters into boto client parameters.
            Passes through EndpointConnectionError or ClientError
            from botocore.'''
         client_kwargs = {}
-        saved_profile = self.session.profile
 
         if endpoint_url:
             client_kwargs['endpoint_url'] = endpoint_url
         elif region:
             client_kwargs['region_name'] = region
-
-        if profile:
-            self.session.profile = profile
 
         if no_verify_ssl:
             client_kwargs['verify'] = False
@@ -198,7 +195,6 @@ class BotoSession:
         client = self.session.create_client(self.service_name,
                 **client_kwargs)
 
-        self.session.profile = saved_profile
         return client
 
     def execute(self, client, no_paginate=None):
@@ -246,7 +242,8 @@ def main():
         # Validate parameters:
         boto_session = BotoSession(module.params['service'],
                 module.params['operation'],
-                module.params['params'])
+                operation_params=module.params['params'],
+                profile=module.params.get('profile'))
         if module.params.get('query'):
             query = jmespath.compile(module.params['query'])
         else:
@@ -254,8 +251,8 @@ def main():
 
         # Create client connection / test connectivity:
         client_params = dict([(k, module.params[k]) for k in
-                ['endpoint_url', 'no_verify_ssl', 'profile',
-                    'region', 'aws_access_key_id', 'aws_secret_access_key',
+                ['endpoint_url', 'no_verify_ssl', 'region', 
+                    'aws_access_key_id', 'aws_secret_access_key',
                     'aws_session_token'] if k in module.params])
         client = boto_session.get_client(**client_params)
         # Execute command:
